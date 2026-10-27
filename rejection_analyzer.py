@@ -3824,7 +3824,8 @@ class RejectionAnalyzer(ChatWorkflowMixin):
                             f"{row['provider']}: {AI_ATTEMPT_STATUS.get(row['status'], row['status'])} "
                             f"({row['seconds']:.1f} с)" for row in attempts)
                         logger.warning('[Разбор %s/%s] Отложен: %s', idx, len(chats),
-                                       reason or 'ИИ выключен или диагностика ответа недоступна')
+                                       reason or ('ИИ выключен в настройках' if analysis.get('ai_enabled') is False
+                                                  else 'Нет выполненных запросов; доступные маршруты нужно проверить'))
                         continue
                     title = chat.get("vacancy_title", "Вакансия")
                     company = chat.get("company_name", "Компания")

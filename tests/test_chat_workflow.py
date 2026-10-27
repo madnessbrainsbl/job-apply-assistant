@@ -1465,6 +1465,10 @@ def chrome_chat(tmp_path, bot):
 
 
 @pytest.mark.parametrize('mode, notice, expected', [
+    ('footer', 'Работодатель отклонил отклик — переписка будет доступна после приглашения', 'invitation_required'),
+    ('bubble', 'Работодатель отклонил отклик — переписка будет доступна после приглашения', 'editor_not_found'),
+    ('hidden', 'Работодатель отклонил отклик — переписка будет доступна после приглашения', 'editor_not_found'),
+    ('ready', 'Работодатель отклонил отклик — переписка будет доступна после приглашения', 'ready'),
     ('footer', 'Переписка будет доступна после приглашения работодателя', 'invitation_required'),
     ('footer', 'Работодатель отключил переписку по данной вакансии', 'employer_disabled'),
     ('bubble', 'Переписка будет доступна после приглашения работодателя', 'editor_not_found'),
@@ -2447,3 +2451,55 @@ def test_sweep_started_on_an_open_chat_url_goes_to_the_list_first(bot):
     bot.process_unread_messenger_chats()
     bot.goto.assert_called_with('https://hh.ru/chat')
     assert bot._last_chat_open_problem['code'] == 'unread_filter_unconfirmed'
+
+
+def test_real_chrome_native_choice_advances_to_open_prompt_without_repeat(chrome_chat):
+    bot = chrome_chat
+    bot.driver.execute_script('''
+        openChat(1); window.choiceClicks=[];
+        const messages=document.getElementById('messages');
+        messages.innerHTML='<div class="chat-bubble chat-bubble_bot" data-qa="chatik-chat-message">'
+            + '<span data-qa="chat-bubble-text">Используем эти ответы?</span></div>';
+        const choices=document.createElement('div');
+        document.getElementById('right').insertBefore(choices,document.getElementById('composer'));
+        const button=document.createElement('button'); button.textContent='Да'; choices.append(button);
+        button.onclick=()=>{ choiceClicks.push('Да'); choices.remove();
+            messages.insertAdjacentHTML('beforeend',
+                '<div class="chat-bubble outgoing" data-qa="chatik-chat-message">Да</div>'
+                + '<div class="chat-bubble chat-bubble_bot" data-qa="chatik-chat-message">'
+                + '<span data-qa="chat-bubble-text">Укажите, пожалуйста, удобный формат общения.</span></div>'); };
+    ''')
+    chat = dict(bot._read_open_chat(), identity='topic:1')
+    assert bot._send_chat_action('choice', chat, 'Да', choice=chat['choice_options'][0])
+    assert not bot._send_chat_action('choice', chat, 'Да', choice=chat['choice_options'][0])
+    assert bot.driver.execute_script('return choiceClicks;') == ['Да']
+    assert bot.driver.execute_script('return sent;') == []
+    assert next(iter(bot._load_chat_actions().values()))['status'] == 'sent'
+
+
+@pytest.mark.parametrize('text, is_bot', [
+    ('Неверный ответ. Попробуйте ещё раз.', True),
+    ('Используем эти ответы?', True),
+    ('Укажите удобный формат общения.', False),
+])
+def test_recruiter_progress_requires_a_new_bot_question(text, is_bot):
+    chat = snapshot(text)
+    chat['messages'][0]['isBot'] = is_bot
+    assert not RejectionAnalyzer._choice_advanced(chat, 'Используем эти ответы?')
+
+
+@pytest.mark.parametrize('prompt', [
+    'Укажите, пожалуйста, удобный формат общения.',
+    'Расскажите о подходе к проверке API.',
+])
+def test_recruiter_choice_confirms_next_open_prompt_without_question_mark(bot, prompt):
+    chat = recruiter_snapshot('Используем эти ответы?')
+    current = dict(chat, choice_options=[], messages=chat['messages'] + [
+        {'text': 'Да', 'isOut': True}, {'text': prompt, 'isOut': False, 'isBot': True}])
+    button = Mock()
+    bot.driver.execute_script.return_value = button
+    bot._read_open_chat = Mock(return_value=current)
+    assert bot._send_chat_action('choice', chat, 'Да', choice=chat['choice_options'][0])
+    assert not bot._send_chat_action('choice', chat, 'Да', choice=chat['choice_options'][0])
+    button.click.assert_called_once()
+    assert next(iter(bot._load_chat_actions().values()))['status'] == 'sent'

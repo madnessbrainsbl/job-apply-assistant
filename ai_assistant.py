@@ -17,6 +17,7 @@ _AI_ATTEMPTS = ContextVar('hh_ai_attempts', default=None)
 _AI_BUSY = ContextVar('hh_ai_busy', default=None)
 AI_ATTEMPT_STATUS = {
     'ok': 'ответ принят', 'busy': 'сервис занят другим разбором',
+    'cooldown': 'временная пауза модели после предыдущего запроса',
     'timeout': 'таймаут', 'invalid_response': 'ответ не прошёл проверку',
     'service_error': 'служебная ошибка сервиса',
     'no_response': 'нет ответа или сервис временно недоступен',
@@ -506,6 +507,11 @@ def clean_public_text(text: str, profile: Optional[Dict] = None) -> str:
     # Модель иногда отдаёт переводы строк буквами «\n» (так вышло 14.10 в образце письма):
     # в письмо работодателю и в отчёт они попадали как видимый мусор.
     text = str(text or '').replace('\\r\\n', '\n').replace('\\n', '\n')
+    text = re.sub(r'<think\b[^>]*>.*?</think\s*>', '', text, flags=re.IGNORECASE | re.DOTALL).strip()
+    if re.search(r'<think\b[^>]*>', text, re.IGNORECASE):
+        return ''
+    if re.search(r'</think\s*>', text, re.IGNORECASE):
+        text = re.split(r'</think\s*>', text, flags=re.IGNORECASE)[-1].strip()
     parts = re.split(r'(\n+|(?<=[.!?;])\s+(?!\d+[.)]\s))', text)
     kept = []
     prefix = ''
@@ -519,6 +525,16 @@ def clean_public_text(text: str, profile: Optional[Dict] = None) -> str:
         low = clause.casefold()
         forbidden = (
             is_salary_question(clause)
+            or re.match(
+                r'\s*(?:the employer (?:says|asks)|i (?:should|need to) respond|maybe ask|good,\s*concrete|'
+                r'работодатель (?:говорит|спрашивает)|мне (?:следует|нужно) ответить)\b', low)
+            or re.search(r'\b(?:обычно\s+)?(?:веду|держу|беру)\s+\d+\s*(?:[-–—]\s*\d+\s*)?'
+                         r'(?:задач|проект)\w*\s+(?:параллельно|одновременно)\b', low)
+            or re.search(r'\bраспылени\w*\b[^.!?;]*\b\d+\s*[-–—]\s*\d+\b', low)
+            or re.search(r'\b(?:закрыть\s+)?передач\w*\s+(?:текущ\w*\s+)?(?:задач|дел)\b|'
+                         r'\b(?:handoff|notice period)\b', low)
+            or re.search(r'\b(?:(?:готов\w*|могу|смогу)\s+(?:приступить|выйти)|приступить\s+смогу|'
+                         r'выход\w*\s+на\s+работ\w*)\b', low)
             or re.search(r'\b(?:вилк\w*|стаж(?:а|ем|у|е)?|многолетн\w*|pay|compensation|remuneration)\b|[₽€£]|\$\s*\d{3,}', low)
             or re.search(r'\b(?:руб(?:лей|ля|ль)?|rur|rub|usd|eur|доллар\w*|dollars?)\b', low)
             or (re.search(r'\b\d+\s*(?:месяц\w*|months?)\b', low) and _EXPERIENCE_CLAIM_RE.search(clause))
@@ -2474,7 +2490,7 @@ class AIAssistant:
             with self._runtime()['available']:
                 self._runtime()['available'].notify_all()
 
-    def _try_chain(self, prompt, system_prompt, validate) -> Optional[str]:
+    def _try_chain(self, prompt, system_prompt, validate, attempted=None) -> Optional[str]:
         deadline = _AI_DEADLINE.get()
         steps = self.ai_order()
         if deadline is not None:
@@ -2489,16 +2505,32 @@ class AIAssistant:
             steps = first + extra
         for step in steps:
             self._request_timeout(15)
-            if time.time() < (self._load_stats().get(step) or {}).get('retry_at', 0):
+            if attempted is not None and step in attempted:
+                continue
+            prior = self._load_stats().get(step) or {}
+            if time.time() < prior.get('retry_at', 0):
+                attempts = _AI_ATTEMPTS.get()
+                if attempts is not None and not any(row['provider'] == step and row['status'] == 'cooldown'
+                                                    for row in attempts):
+                    attempts.append({'provider': step, 'status': 'cooldown', 'seconds': 0})
+                if (_AI_ATTEMPTS.get() is not None and _AI_BUSY.get() is not None
+                        and prior.get('retry_reason') in ('timeout', 'no_response', 'network')
+                        and prior['retry_at'] - time.time() <= 120):
+                    _AI_BUSY.get()[0] = True
                 continue
             started = time.time()
             attempts = _AI_ATTEMPTS.get()
+            previous = next((row for row in reversed(attempts or []) if row['provider'] == step
+                             and row['status'] in ('busy', 'cooldown')), None)
+            if previous is not None:
+                attempts.remove(previous)
             attempt = {'provider': step, 'status': 'no_response', 'seconds': 0}
             attempt_token = _AI_ATTEMPTS.set([attempt]) if attempts is None else None
             if attempts is not None:
                 attempts.append(attempt)
-                logger.info('[ИИ-разбор] Попытка %s: %s, бюджет до %.0f с', len(attempts), step,
-                            self._attempt_budget(step))
+                if previous is None:
+                    logger.info('[ИИ-разбор] Попытка %s: %s, бюджет до %.0f с', len(attempts), step,
+                                self._attempt_budget(step))
             bounded = True
             token = (_AI_DEADLINE.set(min(deadline if deadline is not None else float('inf'),
                                           time.monotonic() + self._attempt_budget(step)))
@@ -2545,13 +2577,15 @@ class AIAssistant:
                 elif cause in ('weekly_quota', 'daily_quota', 'quota'):
                     attempt['status'] = 'quota'
             attempt['seconds'] = round(time.time() - started, 1)
-            if attempts is not None:
+            if attempts is not None and attempt['status'] != 'busy':
                 logger.info('[ИИ-разбор] %s: %s, %.1f с', step,
                             AI_ATTEMPT_STATUS[attempt['status']], attempt['seconds'])
             if attempt['status'] == 'busy':
                 if _AI_BUSY.get() is not None:
                     _AI_BUSY.get()[0] = True
                 continue
+            if attempted is not None:
+                attempted.add(step)
             self._record(step, bool(text) and not problem, time.time() - started)
             with self._provider_lock('stats'):
                 stats = self._load_stats()
@@ -2582,15 +2616,21 @@ class AIAssistant:
         token = _AI_DEADLINE.set(deadline)
         busy = [False]
         busy_token = _AI_BUSY.set(busy)
-        wait_until = min(deadline if deadline is not None else float('inf'), time.monotonic() + 60)
+        wait_until = min(deadline if deadline is not None else float('inf'),
+                         time.monotonic() + (121 if _AI_ATTEMPTS.get() is not None else 60))
+        attempted = set()
+        wait_logged = False
         try:
             while True:
                 busy[0] = False
-                text = self._try_chain(prompt, system_prompt, validate)
+                text = self._try_chain(prompt, system_prompt, validate, attempted)
                 if text:
                     return text
                 if not busy[0] or time.monotonic() >= wait_until:
                     break
+                if not wait_logged:
+                    logger.info('ИИ занят или временно на паузе; жду свободный маршрут, не выдаю шаблон за разбор')
+                    wait_logged = True
                 with self._runtime()['available']:
                     self._runtime()['available'].wait(min(.25, max(0, wait_until - time.monotonic())))
             if deadline is not None:
@@ -3871,4 +3911,5 @@ class AIAssistant:
             # как разобранный.
             "heuristic": True,
             "ai_attempts": attempts if self.enabled else [],
+            "ai_enabled": bool(self.enabled),
         }

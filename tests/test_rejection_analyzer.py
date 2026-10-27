@@ -403,3 +403,25 @@ def test_analysis_finishes_all_refusals_even_after_old_ten_minute_budget(analyze
     assert result['total_deferred'] == 0
     assert result['total_analyzed'] == 10
     assert len(analyzer._load_cached_chats()) == 10
+
+
+def test_parallel_refusals_use_real_chain_after_model_cooldown(analyzer):
+    import time
+    from unittest.mock import Mock
+    chats = [{'vacancy_title': 'AppSec', 'company_name': f'Synthetic {i}'} for i in range(49)]
+    analyzer._load_cached_chats = lambda limit=0: chats
+    analyzer.seen_rejection_keys = lambda: set()
+    ai = analyzer.ai_assistant
+    ai.enabled = True
+    ai.ai_config['cli_providers'] = []
+    ai._background_probes = False
+    ai.steps = lambda: ['compat:ready']
+    ai.ai_order = lambda: ['compat:ready']
+    ai.probe_report = lambda **kwargs: ''
+    ai._ai_stats = {'compat:ready': {'retry_at': time.time() + .2, 'retry_reason': 'timeout'}}
+    ai._call_compat_providers = Mock(return_value='{"rejection_root_cause":"Synthetic reason"}')
+    analyzer.apply_resume_feedback = Mock()
+    analyzer.db.record_rejection_analysis = Mock()
+    result = analyzer.run_chat_analysis(fetch_live=False, auto_apply=False)
+    assert result['total_analyzed'] == 49 and result.get('total_deferred', 0) == 0
+    assert ai._call_compat_providers.call_count == 49

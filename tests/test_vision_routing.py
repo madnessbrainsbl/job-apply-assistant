@@ -206,3 +206,67 @@ def test_menu_vision_check_is_explicit_and_does_not_save_configuration(monkeypat
     menu.choose_ai_provider()
     check.assert_called_once_with(config)
     save.assert_not_called()
+
+
+def test_payment_required_cools_only_that_model_not_other_configured_routes(monkeypatch, caplog):
+    ai = make_ai()
+    ai.api_key = ''
+    ai.ai_config['openai_compatible'] = [dict(ai.ai_config['openai_compatible'][0],
+                                             models=['paid-vision', 'vision-free:free'])]
+    monkeypatch.setattr(requests, 'get', Mock(return_value=reply({'data': [
+        {'id': mid, 'supports_vision': True} for mid in ['paid-vision', 'vision-free:free']]})))
+    calls = []
+    def post(url, **kwargs):
+        model = kwargs['json']['model']
+        calls.append(model)
+        return (reply({'error': {}}, 402) if model == 'vision-free:free'
+                else reply({'choices': [{'message': {'content': 'Ab123'}}]}))
+    monkeypatch.setattr(requests, 'post', post)
+    assert ai.recognize_captcha(b'crop') == 'Ab123'
+    assert calls == ['vision-free:free', 'paid-vision']
+    calls.clear()
+    assert ai.recognize_captcha(b'crop2') == 'Ab123'
+    assert calls == ['paid-vision']
+    assert 'по тарифу' in caplog.text and 'private-error' not in caplog.text
+
+
+def test_image_output_only_model_is_not_used_for_text_recognition(monkeypatch):
+    ai = make_ai()
+    ai.api_key = ''
+    ai.ai_config['openai_compatible'] = [ai.ai_config['openai_compatible'][0]]
+    monkeypatch.setattr(requests, 'get', Mock(return_value=reply({'data': [
+        {'id': 'gemini-new-flash', 'supports_vision': True, 'output_modalities': ['image']}]})))
+    post = Mock()
+    monkeypatch.setattr(requests, 'post', post)
+    assert ai.recognize_captcha(b'crop') is None
+    post.assert_not_called()
+
+
+def test_remote_catalog_does_not_expand_into_unconfigured_paid_models(monkeypatch):
+    ai = make_ai()
+    ai.api_key = ''
+    ai.ai_config['openai_compatible'] = [ai.ai_config['openai_compatible'][0]]
+    monkeypatch.setattr(requests, 'get', Mock(return_value=reply({'data': [
+        {'id': 'vision-expensive', 'supports_vision': True},
+        {'id': 'vision-free:free', 'supports_vision': True}]})))
+    post = Mock(side_effect=lambda _url, **kwargs:
+                reply({'error': {}}, 400) if kwargs['json']['model'] == 'vision-free:free'
+                else reply({'choices': [{'message': {'content': 'Ab123'}}]}))
+    monkeypatch.setattr(requests, 'post', post)
+    assert ai.recognize_captcha(b'crop') is None
+    assert post.call_args.kwargs['json']['model'] == 'vision-free:free'
+    post.assert_called_once()
+
+
+@pytest.mark.parametrize('model', ['Voxtral-Mini-3B-2507', 'whisper-large-v3',
+                                  'seedance-2.0-mini', 'kling-v3.0-pro', 'gpt-image-2.5'])
+def test_media_models_are_not_text_vision_even_if_catalog_claims_image_support(monkeypatch, model):
+    ai = make_ai()
+    ai.api_key = ''
+    ai.ai_config['openai_compatible'] = [dict(ai.ai_config['openai_compatible'][0], models=[model])]
+    monkeypatch.setattr(requests, 'get', Mock(return_value=reply({'data': [
+        {'id': model, 'supports_vision': True}]})))
+    post = Mock()
+    monkeypatch.setattr(requests, 'post', post)
+    assert ai.recognize_captcha(b'crop') is None
+    post.assert_not_called()

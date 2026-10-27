@@ -452,10 +452,20 @@ def split_salary(text):
     from ai_assistant import is_salary_question
     sentences = re.split(r'(?<=[.!?])\s+|\n+', str(text or ''))
     rest, asked = [], False
-    for sentence in sentences:
+    skip_next = False
+    for index, sentence in enumerate(sentences):
+        if skip_next:
+            skip_next = False
+            continue
         low = normalized(sentence)
-        if low and is_salary_question(low) and ('?' in low or any(w in low for w in _ASKING_WORDS)):
+        next_low = normalized(sentences[index + 1]) if index + 1 < len(sentences) else ''
+        linked_followup = bool(
+            low and is_salary_question(low) and next_low
+            and re.search(r'\b(?:могли бы|можете|сможете)\b.{0,40}\b(?:ответить|указать|назвать|озвучить)\b', next_low)
+        )
+        if low and is_salary_question(low) and ('?' in low or any(w in low for w in _ASKING_WORDS) or linked_followup):
             asked = True
+            skip_next = linked_followup
         elif sentence.strip():
             rest.append(sentence.strip())
     return ' '.join(rest), asked
@@ -816,6 +826,7 @@ class ChatWorkflowMixin:
         text = last.get('text', '')
         return bool(last.get('isBot') and normalized(text) != normalized(question)
                     and (chat.get('choice_options') or '?' in text
+                         or re.search(r'^\s*(?:укажите|напишите|расскажите|опишите|перечислите|выберите)\b', text, re.I)
                          or re.search(r'ваши ответы (?:отправлены|переданы) работодателю', text, re.I)))
 
     def _click_chat_choice(self, chat, choice, incoming):
@@ -1556,7 +1567,7 @@ class ChatWorkflowMixin:
                         && !/^(?:отправить|прикрепить|назад|закрыть|перейти|скачать|добавить файл)$/i.test(label)
                         // Подсказки hh для соискателя под чатом — вопросы работодателю, а не ответы
                         // робота-рекрутера («Где находится место работы?», «…»). Их нажатие отправило бы
-                        // работодателю наш вопрос (07.10: «Отправка не подтверждена» ).
+                        // работодателю наш вопрос (07.10: «Отправка не подтверждена» в Сбер IT).
                         && !/[?？]$/.test(label) && !/^[.…⋯]+$/.test(label)
                         && !/^(?:у меня есть профильный опыт|можно без опыта|какой график работы|какая схема оплаты|где находится место работы|могу работать в гибком графике|здравствуйте|добрый день|добрый вечер|доброе утро|привет)/i.test(label);
                 }).map((el, index) => {
@@ -1592,7 +1603,7 @@ class ChatWorkflowMixin:
             const excluded = el => el.closest(arguments[0]) || el.closest(arguments[1]);
             const text = el => (el.innerText || '').replace(/\s+/g, ' ').trim();
             const notices = [...document.querySelectorAll('body *')].filter(el =>
-                visible(el) && !excluded(el) && /^(?:Вакансия\s+[«"].+[»"]\s+была перенесена в архив|Переписка будет доступна после приглашения работодателя|Работодатель отключил переписку по данной вакансии|Переписка (?:по данной вакансии )?(?:отключена|недоступна))[.!]?$/i
+                visible(el) && !excluded(el) && /^(?:Вакансия\s+[«"].+[»"]\s+была перенесена в архив|Переписка будет доступна после приглашения работодателя|Работодатель отклонил отклик\s*[—–-]\s*переписка будет доступна после приглашения|Работодатель отключил переписку по данной вакансии|Переписка (?:по данной вакансии )?(?:отключена|недоступна))[.!]?$/i
                     .test(text(el)));
             const editors = [...document.querySelectorAll('textarea, input[data-qa*="chat"], [contenteditable], [role="textbox"]')]
                 .filter(el => !excluded(el)).map(el => ({tag:el.tagName, qa:el.getAttribute('data-qa'),
@@ -1603,7 +1614,7 @@ class ChatWorkflowMixin:
         """, MESSAGE_SELECTOR, CARD_SELECTOR) or {}
         details['state'] = ('ready' if self.find_chat_message_input() is not None
                             else 'vacancy_archived' if re.match(r'Вакансия\s+[«"]', details.get('notice', ''), re.I)
-                            else 'invitation_required' if re.match(r'Переписка будет доступна после приглашения',
+                            else 'invitation_required' if re.match(r'(?:Переписка будет доступна после приглашения|Работодатель отклонил отклик\s*[—–-]\s*переписка будет доступна после приглашения)',
                                                                   details.get('notice', ''), re.I)
                             else 'employer_disabled' if details.get('notice') else 'editor_not_found')
         return details

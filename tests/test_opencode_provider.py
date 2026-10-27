@@ -713,3 +713,19 @@ def test_settings_cli_uses_isolated_profile_and_rejects_invalid_model(tmp_path, 
                             capture_output=True, timeout=20)
     assert result.returncode == 1
     assert path.read_bytes() == before
+
+
+def test_request_rejects_unclosed_reasoning(monkeypatch):
+    monkeypatch.setattr(provider, 'run_cli_process', lambda *args, **kwargs: events(
+        {'type': 'text', 'part': {'text': '<think>I should respond briefly'}}))
+    result = provider.request('synthetic', 'opencode/new-free', 'test', 'system', 3)
+    assert result == {'ok': False, 'text': '', 'model': 'opencode/new-free', 'problem': 'request_failed'}
+
+
+def test_request_keeps_only_final_text_after_reasoning(monkeypatch):
+    leaked = ('The employer says they are ready to answer questions. I should respond briefly. '
+              'Good, concrete. </think>Да, пара вопросов есть...')
+    monkeypatch.setattr(provider, 'run_cli_process', lambda *args, **kwargs: events(
+        {'type': 'text', 'part': {'text': leaked}}))
+    result = provider.request('synthetic', 'opencode/new-free', 'test', 'system', 3)
+    assert result['ok'] and result['text'] == 'Да, пара вопросов есть...'

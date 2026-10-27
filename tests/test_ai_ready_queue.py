@@ -238,3 +238,59 @@ def test_live_control_uses_real_preparation_pipeline_with_isolated_history(monke
     assert 'private-contact' not in files[0].read_text(encoding='utf-8')
     assert json.loads(files[0].read_text(encoding='utf-8')) == report
     assert not (Path(rejection_analyzer.SCRIPT_DIR) / 'chat_actions.json').exists()
+
+
+def test_long_or_auth_cooldown_has_explicit_diagnostics_without_waiting():
+    import ai_assistant as mod
+    ai = assistant()
+    ai.steps = lambda: ['compat:ready']
+    ai._ai_stats = {'compat:ready': {'retry_at': time.time() + 600, 'retry_reason': 'auth'}}
+    attempts = []
+    token = mod._AI_ATTEMPTS.set(attempts)
+    started = time.monotonic()
+    try:
+        assert ai._call_llm('question', deadline=float('inf')) is None
+    finally:
+        mod._AI_ATTEMPTS.reset(token)
+    assert time.monotonic() - started < 1
+    assert attempts == [{'provider': 'compat:ready', 'status': 'cooldown', 'seconds': 0}]
+
+
+def test_busy_polling_records_each_provider_once(monkeypatch):
+    import ai_assistant as mod
+    ai = assistant()
+    ai.steps = lambda: ['compat:ready']
+    attempts = []
+    token = mod._AI_ATTEMPTS.set(attempts)
+    def busy(*_):
+        mod._AI_ATTEMPTS.get()[-1]['status'] = 'busy'
+        return None
+    ai._call_step = busy
+    try:
+        for _ in range(8):
+            ai._try_chain('question', None, None)
+    finally:
+        mod._AI_ATTEMPTS.reset(token)
+    assert len(attempts) == 1
+
+
+def test_analysis_waits_for_transient_cooldown_instead_of_empty_diagnostics(monkeypatch):
+    import ai_assistant as mod
+    ai = assistant()
+    ai.steps = lambda: ['compat:ready']
+    ai._ai_stats = {'compat:ready': {'retry_at': 1120, 'retry_reason': 'timeout'}}
+    clock = [1000.0]
+    monkeypatch.setattr('ai_assistant.time.time', lambda: clock[0])
+    monkeypatch.setattr('ai_assistant.time.monotonic', lambda: clock[0])
+    condition = Mock()
+    condition.__enter__ = Mock(return_value=condition)
+    condition.__exit__ = Mock(return_value=False)
+    condition.wait.side_effect = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    ai._runtime()['available'] = condition
+    ai._call_step = Mock(return_value='analysis')
+    token = mod._AI_ATTEMPTS.set([])
+    try:
+        assert ai._call_llm('question', deadline=float('inf')) == 'analysis'
+    finally:
+        mod._AI_ATTEMPTS.reset(token)
+    ai._call_step.assert_called_once()

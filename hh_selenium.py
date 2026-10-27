@@ -3286,11 +3286,14 @@ class HHSeleniumBot:
     
     def collect_question_blocks(self, container=None):
         """Собирает видимые блоки вопросов работодателя (в модалке или на странице-анкете)."""
+        from questionnaire_dom import collect_dom_questions
+
         scopes = []
         if container is not None:
             scopes.append(container)
         scopes.append(self.driver)
 
+        known = []
         for scope in scopes:
             blocks = []
             seen = set()
@@ -3315,9 +3318,10 @@ class HHSeleniumBot:
                     except Exception:
                         continue
             if blocks:
-                return self.drop_wrapper_blocks(blocks)
+                known = self.drop_wrapper_blocks(blocks)
+                break
 
-        return []
+        return known + collect_dom_questions(self.driver, container, known)
 
     @staticmethod
     def drop_wrapper_blocks(blocks):
@@ -3458,6 +3462,8 @@ class HHSeleniumBot:
 
     def describe_memory_question(self, block, question_text):
         """Only unambiguous blocks with one answer type can be reused."""
+        if getattr(block, 'unresolved', False) is True:
+            return None
         from question_memory import question_signature
         radios = block.find_elements(By.CSS_SELECTOR, 'input[type="radio"]')
         boxes = block.find_elements(By.CSS_SELECTOR, 'input[type="checkbox"]')
@@ -3676,6 +3682,8 @@ class HHSeleniumBot:
         """
         answered = 0
         short_q = ' '.join(question_text.split())[:120]
+        if getattr(block, 'unresolved', False) is True:
+            return 0, short_q
 
         try:
             descriptor = self.describe_memory_question(block, question_text)
@@ -3725,7 +3733,7 @@ class HHSeleniumBot:
                 text_fields.append(field)
         except Exception as e:
             logging.debug(f"Не удалось разобрать блок вопроса: {e}")
-            return 0, None
+            return 0, f'{short_q} [не удалось разобрать поля вопроса]'
 
         # 1. Выбор одного варианта (radio)
         if radios:
@@ -4020,6 +4028,8 @@ class HHSeleniumBot:
         seen_texts = {}
         for block in blocks:
             try:
+                if getattr(block, 'unresolved', False) is True:
+                    continue
                 text = ' '.join((block.text or '').split())
                 block_id = getattr(block, 'id', None)
             except Exception:

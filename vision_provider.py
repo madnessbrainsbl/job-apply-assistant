@@ -14,9 +14,15 @@ logger = logging.getLogger(__name__)
 
 
 def image_support(row):
+    # Some catalogues label media generators as vision models; they cannot return chat text.
+    if re.search(r'(?:^|/)(?:voxtral|whisper|seedance|kling|gpt-image)(?:[-_.]|$)', str(row.get('id', '')), re.I):
+        return False
     for source in (row, row.get('capabilities') or {}):
         if not isinstance(source, dict):
             continue
+        outputs = source.get('output_modalities')
+        if isinstance(outputs, list) and 'text' not in outputs:
+            return False
         for field in ('supports_vision', 'vision'):
             if type(source.get(field)) is bool:
                 return source[field]
@@ -24,6 +30,9 @@ def image_support(row):
         if isinstance(modalities, list):
             return 'image' in modalities
     architecture = row.get('architecture') or {}
+    if (isinstance(architecture, dict) and isinstance(architecture.get('output_modalities'), list)
+            and 'text' not in architecture['output_modalities']):
+        return False
     if isinstance(architecture, dict) and isinstance(architecture.get('input_modalities'), list):
         return 'image' in architecture['input_modalities']
     return None
@@ -109,6 +118,8 @@ class VisionRouter:
         model = settings.get('model') or self.ai.model_name
         if not model or (not key and provider != 'ollama'):
             return None
+        if image_support({'id': model}) is False:
+            return None
         base = ('https://generativelanguage.googleapis.com/v1beta' if provider in ('gemini', 'google') else
                 settings.get('base_url') or (self.ai.base_url if provider == self.ai.provider else '')
                 or PROVIDER_BASE_URL.get(provider) or 'https://api.openai.com/v1')
@@ -138,13 +149,14 @@ class VisionRouter:
                 mid = row['id']
                 # Missing metadata permits only a small, recognizable vision family, never GPT-OSS/text-only.
                 hint = re.search(r'gemini-.*flash|claude-.*haiku|(?:^|[-_/])(?:vision|vl)(?:[-_:]|$)', mid, re.I)
-                if row['vision'] is False or (row['vision'] is None and not hint):
+                if image_support(row) is False or (row['vision'] is None and not hint):
                     continue
-                if base == 'https://tokenharbor.ai/v1' and not mid.endswith(':free') and mid not in (p.get('models') or []):
-                    continue  # Do not silently expand the configured free-only TokenHarbor access.
+                if (not self.local(base) and not (row['free'] or mid.endswith(':free') or row['price'] == 0)
+                        and mid not in (p.get('models') or [p.get('model')])):
+                    continue  # A remote catalogue is not authorization to use additional paid models.
                 candidates.append({'name': p.get('name') or 'API', 'kind': 'openai', 'base': base,
                                    'key': p['api_key'], 'model': mid,
-                                   'free': row['free'] or mid.endswith(':free'), 'price': row['price']})
+                                   'free': row['free'] or mid.endswith(':free') or row['price'] == 0, 'price': row['price']})
         def rank(candidate):
             prior = (self.state().get('models') or {}).get(self.fingerprint(
                 candidate['base'], candidate['key'], candidate['model'])) or {}
@@ -226,9 +238,10 @@ class VisionRouter:
                         exc, (requests.ConnectionError, requests.Timeout)):
                     self.remember('services', service, time.time() + (600 if reason or status in (401, 403) else 60))
                 self.remember('models', fingerprint, {'ok': False, 'seconds': round(time.monotonic() - started, 2),
-                                                      'until': time.time() + (600 if status in (400, 404) else 60)})
+                                                      'until': time.time() + (600 if status in (400, 402, 404) else 60)})
                 logger.warning('Vision: %s — %s (%s, HTTP %s%s); пробую другой доступный ИИ',
-                               candidate['name'], 'неподходящий формат ответа' if isinstance(exc, ValueError) else 'ошибка запроса',
+                               candidate['name'], ('модель недоступна по тарифу' if status == 402 else
+                               'неподходящий формат ответа' if isinstance(exc, ValueError) else 'ошибка запроса'),
                                type(exc).__name__, status if isinstance(status, int) else 'нет',
                                ', ' + reason if reason else '')
         return None

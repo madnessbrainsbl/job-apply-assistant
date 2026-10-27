@@ -79,6 +79,16 @@ def go_key():
     raise ValueError('OpenCode Go: сначала подключите подписку в самом OpenCode')
 
 
+def _final_answer(text):
+    text = str(text or '').strip()
+    text = re.sub(r'<think\b[^>]*>.*?</think\s*>', '', text, flags=re.IGNORECASE | re.DOTALL).strip()
+    if re.search(r'<think\b[^>]*>', text, re.IGNORECASE):
+        return ''
+    if re.search(r'</think\s*>', text, re.IGNORECASE):
+        text = re.split(r'</think\s*>', text, flags=re.IGNORECASE)[-1].strip()
+    return text
+
+
 def request(executable, model, prompt, system_prompt, timeout):
     provider, separator, identifier = model.partition('/')
     mode = {'opencode': 'free', 'opencode-go': 'go'}.get(provider)
@@ -135,6 +145,6 @@ def request(executable, model, prompt, system_prompt, timeout):
                 parts[part.get('id') or 'answer'] = part['text']
         if process.returncode and not problem:
             problem = cli_problem(process.stderr.decode('utf-8', errors='replace'))
-        answer = '\n'.join(parts.values()).strip()
+        answer = _final_answer('\n'.join(parts.values()))
         return {'ok': bool(answer) and not problem, 'text': answer if not problem else '',
                 'model': model, 'problem': problem or ('' if answer else 'request_failed')}

@@ -22,7 +22,7 @@ def test_public_text_removes_personal_terms_but_keeps_technical_details():
             'Ожидания 200 000 руб. Зарплату обсудим.\n' + technical)
     assert clean_public_text(text, PROFILE) == technical
     assert clean_public_text('Готов приступить через 2 месяца. Интервью 05.10.2026 в 14:30.') == (
-        'Готов приступить через 2 месяца. Интервью 05.10.2026 в 14:30.')
+        'Интервью 05.10.2026 в 14:30.')
 
 
 def test_public_context_and_all_letter_sources_exclude_private_history():
@@ -87,3 +87,14 @@ def test_browser_boundary_cleans_existing_custom_and_cached_answers():
     bot.set_text_input_value = Mock(return_value=True)
     assert bot.fill_cover_letter('Опыт 6,75 лет. Применял Terraform для CI/CD.')
     assert bot.set_text_input_value.call_args.args[1] == 'Применял Terraform для CI/CD.'
+
+
+def test_public_text_removes_reasoning_workload_and_handoff_claims():
+    technical = 'Применяю Python для проверки API.'
+    assert clean_public_text(
+        'The employer says this is enough. I should respond briefly. </think>' + technical, PROFILE) == technical
+    assert clean_public_text('Обычно веду 3–4 задачи параллельно. ' + technical, PROFILE) == technical
+    assert clean_public_text('Распыление начинается где-то с 5–6. ' + technical, PROFILE) == technical
+    assert clean_public_text('Сейчас нужно только закрыть передачу текущих задач. ' + technical, PROFILE) == technical
+    assert clean_public_text('Готов приступить через 2 месяца. ' + technical, PROFILE) == technical
+    assert clean_public_text('<think>draft without final', PROFILE) == ''
